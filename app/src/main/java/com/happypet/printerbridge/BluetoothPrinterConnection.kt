@@ -1,5 +1,6 @@
 package com.happypet.printerbridge
 
+import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothSocket
 import java.io.IOException
@@ -13,7 +14,7 @@ class BluetoothPrinterConnection(
 ) : PrinterConnection {
 
     companion object {
-        // Standard Serial Port Profile UUID commonly used by classic Bluetooth receipt printers.
+        // Standard Bluetooth Serial Port Profile UUID.
         val SPP_UUID: UUID =
             UUID.fromString("00001101-0000-1000-8000-00805F9B34FB")
     }
@@ -26,21 +27,33 @@ class BluetoothPrinterConnection(
     override fun connect() {
         Thread {
             try {
-                val adapter = device.adapter
-                adapter.cancelDiscovery()
+                // Get the Bluetooth adapter separately.
+                val adapter = BluetoothAdapter.getDefaultAdapter()
 
-                val newSocket = device.createRfcommSocketToServiceRecord(SPP_UUID)
+                // Stop Bluetooth discovery before connecting.
+                adapter?.cancelDiscovery()
+
+                val newSocket =
+                    device.createRfcommSocketToServiceRecord(SPP_UUID)
+
                 newSocket.connect()
+
                 socket = newSocket
 
                 onConnected()
+
             } catch (e: Exception) {
+
                 try {
                     socket?.close()
                 } catch (_: Exception) {
                 }
+
                 socket = null
-                onError(e.message ?: "Bluetooth connection failed")
+
+                onError(
+                    e.message ?: "Bluetooth connection failed"
+                )
             }
         }.start()
     }
@@ -50,26 +63,30 @@ class BluetoothPrinterConnection(
             socket?.close()
         } catch (_: Exception) {
         }
+
         socket = null
+
         onDisconnected()
     }
 
     override fun print(data: ByteArray) {
         Thread {
             try {
-                val current = socket
-                    ?: throw IOException("Bluetooth printer is not connected")
+                val currentSocket = socket
+                    ?: throw IOException(
+                        "Bluetooth printer is not connected"
+                    )
 
-                current.outputStream.use { output ->
-                    output.write(data)
-                    output.flush()
-                }
+                val output = currentSocket.outputStream
 
-                // A Bluetooth socket normally stays connected until explicitly closed.
-                // Closing the output stream may vary by implementation, so this class
-                // can be refined after testing the actual printer.
+                output.write(data)
+                output.flush()
+
             } catch (e: Exception) {
-                onError(e.message ?: "Bluetooth print failed")
+
+                onError(
+                    e.message ?: "Bluetooth print failed"
+                )
             }
         }.start()
     }
