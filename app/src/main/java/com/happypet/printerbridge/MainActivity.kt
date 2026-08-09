@@ -10,7 +10,6 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.hardware.usb.UsbDevice
-import android.hardware.usb.UsbDeviceConnection
 import android.hardware.usb.UsbManager
 import android.os.Build
 import android.os.Bundle
@@ -131,9 +130,7 @@ class MainActivity : ComponentActivity() {
             setPadding(0, 0, 0, dp(8))
         }
 
-        val typeRow = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-        }
+        val typeRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
 
         bluetoothButton = Button(this).apply {
             text = "Bluetooth"
@@ -232,21 +229,9 @@ class MainActivity : ComponentActivity() {
         }
 
         listOf(
-            title,
-            subtitle,
-            statusText,
-            typeLabel,
-            typeRow,
-            happyPetButton,
-            findBluetoothButton,
-            findUsbButton,
-            wifiFields,
-            printerText,
-            selectedText,
-            connectButton,
-            disconnectButton,
-            testButton,
-            note
+            title, subtitle, statusText, typeLabel, typeRow, happyPetButton,
+            findBluetoothButton, findUsbButton, wifiFields, printerText,
+            selectedText, connectButton, disconnectButton, testButton, note
         ).forEach { root.addView(it) }
 
         setContentView(scroll)
