@@ -12,81 +12,42 @@ class BluetoothPrinterConnection(
     private val onDisconnected: () -> Unit,
     private val onError: (String) -> Unit
 ) : PrinterConnection {
-
     companion object {
-        // Standard Bluetooth Serial Port Profile UUID.
-        val SPP_UUID: UUID =
-            UUID.fromString("00001101-0000-1000-8000-00805F9B34FB")
+        val SPP_UUID: UUID = UUID.fromString("00001101-0000-1000-8000-00805F9B34FB")
     }
-
     private var socket: BluetoothSocket? = null
-
-    override val isConnected: Boolean
-        get() = socket?.isConnected == true
+    override val isConnected: Boolean get() = socket?.isConnected == true
 
     override fun connect() {
         Thread {
             try {
-                // Get the Bluetooth adapter separately.
-                val adapter = BluetoothAdapter.getDefaultAdapter()
-
-                // Stop Bluetooth discovery before connecting.
-                adapter?.cancelDiscovery()
-
-                val newSocket =
-                    device.createRfcommSocketToServiceRecord(SPP_UUID)
-
-                newSocket.connect()
-
-                socket = newSocket
-
+                BluetoothAdapter.getDefaultAdapter()?.cancelDiscovery()
+                val s = device.createRfcommSocketToServiceRecord(SPP_UUID)
+                s.connect()
+                socket = s
                 onConnected()
-
             } catch (e: Exception) {
-
-                try {
-                    socket?.close()
-                } catch (_: Exception) {
-                }
-
+                try { socket?.close() } catch (_: Exception) {}
                 socket = null
-
-                onError(
-                    e.message ?: "Bluetooth connection failed"
-                )
+                onError(e.message ?: "Bluetooth connection failed")
             }
         }.start()
     }
 
     override fun disconnect() {
-        try {
-            socket?.close()
-        } catch (_: Exception) {
-        }
-
+        try { socket?.close() } catch (_: Exception) {}
         socket = null
-
         onDisconnected()
     }
 
     override fun print(data: ByteArray) {
         Thread {
             try {
-                val currentSocket = socket
-                    ?: throw IOException(
-                        "Bluetooth printer is not connected"
-                    )
-
-                val output = currentSocket.outputStream
-
-                output.write(data)
-                output.flush()
-
+                val s = socket ?: throw IOException("Bluetooth printer is not connected")
+                s.outputStream.write(data)
+                s.outputStream.flush()
             } catch (e: Exception) {
-
-                onError(
-                    e.message ?: "Bluetooth print failed"
-                )
+                onError(e.message ?: "Bluetooth print failed")
             }
         }.start()
     }
