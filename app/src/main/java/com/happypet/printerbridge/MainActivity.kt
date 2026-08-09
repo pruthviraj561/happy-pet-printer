@@ -29,6 +29,8 @@ class MainActivity : ComponentActivity() {
     companion object {
         private const val REQUEST_BLUETOOTH = 1001
         private const val ACTION_USB_PERMISSION = "com.happypet.printerbridge.USB_PERMISSION"
+        private const val PRINTER_VENDOR_ID = 0x0483
+        private const val PRINTER_PRODUCT_ID = 0x5840
     }
 
     private enum class ConnectionType { BLUETOOTH, USB, WIFI }
@@ -218,24 +220,62 @@ class MainActivity : ComponentActivity() {
         if (devices.isEmpty()) {
             usbDevice = null
             connect.isEnabled = false
-            details.text = "No USB device detected. Connect the printer through OTG and try again."
+            details.text = "No USB device detected. Android UsbManager currently sees 0 USB devices.\n\nConnect the printer through USB OTG, unlock the phone, then tap Detect USB Printers again."
             setStatus("No USB device found.")
             return
         }
-        val candidate = devices.firstOrNull { UsbPrinterConnection.findPrinterInterface(it) != null }
+
+        // First show every device visible to Android. This is intentionally not
+        // restricted to printer-class interfaces so we can diagnose VID/PID issues.
+        val deviceLines = devices.mapIndexed { index, device ->
+            val manufacturer = try { device.manufacturerName ?: "Unknown" } catch (_: Exception) { "Unknown" }
+            val product = try { device.productName ?: device.deviceName ?: "Unknown" } catch (_: Exception) { device.deviceName ?: "Unknown" }
+            val printerId = device.vendorId == PRINTER_VENDOR_ID && device.productId == PRINTER_PRODUCT_ID
+            val marker = if (printerId) " <-- VEER / OLIVETTI VID/PID" else ""
+            "${index + 1}. $product$marker\n" +
+                "Manufacturer: $manufacturer\n" +
+                "VID: ${String.format("%04X", device.vendorId)}  PID: ${String.format("%04X", device.productId)}\n" +
+                "Device: ${device.deviceName}\n" +
+                "Interfaces: ${device.interfaceCount}"
+        }
+
+        val knownPrinter = devices.firstOrNull {
+            it.vendorId == PRINTER_VENDOR_ID && it.productId == PRINTER_PRODUCT_ID
+        }
+        val endpointPrinter = devices.firstOrNull {
+            UsbPrinterConnection.findPrinterInterface(it) != null
+        }
+        val candidate = knownPrinter ?: endpointPrinter
+
         if (candidate == null) {
             usbDevice = null
             connect.isEnabled = false
-            details.text = "USB devices were found, but no compatible bulk OUT printer interface was detected."
-            setStatus("No compatible USB printer found.")
+            details.text = "Android USB devices detected:\n\n" + deviceLines.joinToString("\n\n") +
+                "\n\nNo supported printer endpoint was found."
+            setStatus("USB device(s) found, but no printer endpoint is available.")
             return
         }
+
         usbDevice = candidate
         val name = candidate.productName ?: candidate.deviceName ?: "USB Printer"
-        details.text = "USB printer\nVID: ${candidate.vendorId}\nPID: ${candidate.productId}"
+        val isKnownPrinter = candidate.vendorId == PRINTER_VENDOR_ID && candidate.productId == PRINTER_PRODUCT_ID
+        val endpoint = UsbPrinterConnection.findPrinterInterface(candidate)
+
+        details.text = "Android USB devices detected:\n\n" +
+            deviceLines.joinToString("\n\n") +
+            "\n\nSelected: $name" +
+            "\nKnown printer VID/PID: ${if (isKnownPrinter) "YES" else "NO"}" +
+            "\nBulk OUT endpoint: ${if (endpoint != null) "YES" else "NO"}" +
+            "\nUSB permission: ${if (usbManager.hasPermission(candidate)) "GRANTED" else "NOT GRANTED"}"
         selected.text = "Selected printer: $name"
-        connect.isEnabled = true
-        setStatus(if (usbManager.hasPermission(candidate)) "USB permission already granted." else "USB printer detected. Tap Connect Printer for permission.")
+
+        if (endpoint == null) {
+            connect.isEnabled = false
+            setStatus("VEER printer detected by VID/PID, but no bulk OUT endpoint was found. Interface details are shown above.")
+        } else {
+            connect.isEnabled = true
+            setStatus(if (usbManager.hasPermission(candidate)) "USB printer detected and permission is already granted." else "USB printer detected. Tap Connect Printer to request permission.")
+        }
     }
 
     private fun connectSelected() {
