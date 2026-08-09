@@ -26,7 +26,6 @@ import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 
 class MainActivity : ComponentActivity() {
-
     companion object {
         private const val REQUEST_BLUETOOTH = 1001
         private const val ACTION_USB_PERMISSION = "com.happypet.printerbridge.USB_PERMISSION"
@@ -34,66 +33,58 @@ class MainActivity : ComponentActivity() {
 
     private enum class ConnectionType { BLUETOOTH, USB, WIFI }
 
-    private lateinit var statusText: TextView
-    private lateinit var printerText: TextView
-    private lateinit var selectedText: TextView
-    private lateinit var connectButton: Button
-    private lateinit var disconnectButton: Button
-    private lateinit var testButton: Button
-    private lateinit var bluetoothButton: Button
-    private lateinit var usbButton: Button
-    private lateinit var wifiButton: Button
-    private lateinit var findBluetoothButton: Button
-    private lateinit var findUsbButton: Button
+    private lateinit var status: TextView
+    private lateinit var details: TextView
+    private lateinit var selected: TextView
+    private lateinit var connect: Button
+    private lateinit var disconnect: Button
+    private lateinit var test: Button
+    private lateinit var bluetoothTab: Button
+    private lateinit var usbTab: Button
+    private lateinit var wifiTab: Button
+    private lateinit var bluetoothFind: Button
+    private lateinit var usbFind: Button
     private lateinit var wifiFields: LinearLayout
-    private lateinit var ipEditText: EditText
-    private lateinit var portEditText: EditText
+    private lateinit var ip: EditText
+    private lateinit var port: EditText
 
-    private var connectionType = ConnectionType.BLUETOOTH
-    private var selectedDevice: BluetoothDevice? = null
-    private var selectedUsbDevice: UsbDevice? = null
-    private var connection: PrinterConnection? = null
+    private var type = ConnectionType.BLUETOOTH
+    private var bluetoothDevice: BluetoothDevice? = null
+    private var usbDevice: UsbDevice? = null
+    private var printerConnection: PrinterConnection? = null
+    private val usbManager by lazy { getSystemService(Context.USB_SERVICE) as UsbManager }
 
-    private val usbManager: UsbManager by lazy {
-        getSystemService(Context.USB_SERVICE) as UsbManager
-    }
-
-    private val usbPermissionReceiver = object : BroadcastReceiver() {
+    private val usbReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             if (intent?.action != ACTION_USB_PERMISSION) return
-
-            val device = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            val device = if (Build.VERSION.SDK_INT >= 33) {
                 intent.getParcelableExtra(UsbManager.EXTRA_DEVICE, UsbDevice::class.java)
             } else {
-                @Suppress("DEPRECATION")
-                intent.getParcelableExtra(UsbManager.EXTRA_DEVICE)
+                @Suppress("DEPRECATION") intent.getParcelableExtra(UsbManager.EXTRA_DEVICE)
             }
-
             if (device == null) {
-                setStatus("USB permission response did not include a printer.")
+                setStatus("USB permission response did not include a device.")
                 return
             }
-
             if (intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false)) {
-                selectedUsbDevice = device
-                connectSelectedUsbDevice()
+                usbDevice = device
+                connectUsb()
             } else {
                 setStatus("USB permission was denied.")
             }
         }
     }
 
-    override fun onCreate(savedInstanceState: Bundle?) {
-        super.onCreate(savedInstanceState)
-        registerUsbPermissionReceiver()
+    override fun onCreate(state: Bundle?) {
+        super.onCreate(state)
+        registerUsbReceiver()
         buildUi()
-        requestBluetoothPermissionsIfNeeded()
+        requestBluetoothPermission()
     }
 
     override fun onDestroy() {
-        connection?.disconnect()
-        connection = null
-        try { unregisterReceiver(usbPermissionReceiver) } catch (_: Exception) {}
+        printerConnection?.disconnect()
+        try { unregisterReceiver(usbReceiver) } catch (_: Exception) {}
         super.onDestroy()
     }
 
@@ -102,519 +93,240 @@ class MainActivity : ComponentActivity() {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(20), dp(20), dp(20), dp(20))
         }
-
         val scroll = ScrollView(this).apply { addView(root) }
 
-        val title = TextView(this).apply {
+        root.addView(TextView(this).apply {
             text = "Happy Pet Printer"
             textSize = 26f
             setTypeface(typeface, android.graphics.Typeface.BOLD)
-        }
-
-        val subtitle = TextView(this).apply {
-            text = "Connect a Bluetooth, USB, or Wi-Fi thermal printer and send a test receipt."
+        })
+        root.addView(TextView(this).apply {
+            text = "Bluetooth, USB and Wi-Fi thermal printer test"
             textSize = 16f
-            setPadding(0, dp(6), 0, dp(18))
-        }
+            setPadding(0, dp(6), 0, dp(16))
+        })
+        status = TextView(this).apply { textSize = 16f; setPadding(0, 0, 0, dp(12)) }
+        root.addView(status)
 
-        statusText = TextView(this).apply {
-            text = "Status: Ready"
-            textSize = 16f
-            setPadding(0, 0, 0, dp(14))
-        }
+        val tabs = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        bluetoothTab = Button(this).apply { text = "Bluetooth"; setOnClickListener { selectType(ConnectionType.BLUETOOTH) } }
+        usbTab = Button(this).apply { text = "USB"; setOnClickListener { selectType(ConnectionType.USB) } }
+        wifiTab = Button(this).apply { text = "Wi-Fi"; setOnClickListener { selectType(ConnectionType.WIFI) } }
+        listOf(bluetoothTab, usbTab, wifiTab).forEach { tabs.addView(it, LinearLayout.LayoutParams(0, -2, 1f)) }
+        root.addView(tabs)
 
-        val typeLabel = TextView(this).apply {
-            text = "Connection Type"
-            textSize = 16f
-            setTypeface(typeface, android.graphics.Typeface.BOLD)
-            setPadding(0, 0, 0, dp(8))
-        }
-
-        val typeRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-
-        bluetoothButton = Button(this).apply {
-            text = "Bluetooth"
-            setOnClickListener { selectConnectionType(ConnectionType.BLUETOOTH) }
-        }
-        usbButton = Button(this).apply {
-            text = "USB"
-            setOnClickListener { selectConnectionType(ConnectionType.USB) }
-        }
-        wifiButton = Button(this).apply {
-            text = "Wi-Fi"
-            setOnClickListener { selectConnectionType(ConnectionType.WIFI) }
-        }
-
-        listOf(bluetoothButton, usbButton, wifiButton).forEach {
-            typeRow.addView(it, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
-        }
-
-        val happyPetButton = Button(this).apply {
-            text = "Connect to Happy Pet"
-            setOnClickListener {
-                showComingSoon(
-                    "Happy Pet connection is the next integration layer. " +
-                        "The standalone printer test is ready first."
-                )
-            }
-        }
-
-        findBluetoothButton = Button(this).apply {
+        bluetoothFind = Button(this).apply {
             text = "Find Paired Bluetooth Printers"
-            setOnClickListener { findPairedBluetoothPrinters() }
+            setOnClickListener { findBluetooth() }
         }
+        root.addView(bluetoothFind)
 
-        findUsbButton = Button(this).apply {
+        usbFind = Button(this).apply {
             text = "Detect USB Printers"
-            setOnClickListener { detectUsbPrinters() }
+            setOnClickListener { findUsb() }
         }
+        root.addView(usbFind)
 
-        wifiFields = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            visibility = View.GONE
-        }
-
-        ipEditText = EditText(this).apply {
+        wifiFields = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        ip = EditText(this).apply {
             hint = "Printer IP address"
-            singleLine = true
+            setSingleLine(true)
             inputType = InputType.TYPE_CLASS_PHONE
         }
-
-        portEditText = EditText(this).apply {
-            hint = "Port (default 9100)"
+        port = EditText(this).apply {
+            hint = "Port"
             setText("9100")
-            singleLine = true
+            setSingleLine(true)
             inputType = InputType.TYPE_CLASS_NUMBER
         }
+        wifiFields.addView(ip)
+        wifiFields.addView(port)
+        root.addView(wifiFields)
 
-        wifiFields.addView(ipEditText)
-        wifiFields.addView(portEditText)
+        details = TextView(this).apply { textSize = 15f; setPadding(0, dp(10), 0, dp(6)) }
+        selected = TextView(this).apply { textSize = 15f; setPadding(0, 0, 0, dp(8)) }
+        root.addView(details)
+        root.addView(selected)
 
-        printerText = TextView(this).apply {
-            text = "No printer detected."
-            textSize = 15f
-            setPadding(dp(8), dp(8), dp(8), dp(12))
-        }
-
-        selectedText = TextView(this).apply {
-            text = "Selected printer: None"
-            textSize = 15f
-            setPadding(0, dp(4), 0, dp(10))
-        }
-
-        connectButton = Button(this).apply {
-            text = "Connect Printer"
-            isEnabled = false
-            setOnClickListener { connectSelectedPrinter() }
-        }
-
-        disconnectButton = Button(this).apply {
-            text = "Disconnect"
-            isEnabled = false
-            setOnClickListener { disconnectPrinter() }
-        }
-
-        testButton = Button(this).apply {
-            text = "TEST PRINT"
-            isEnabled = false
-            setOnClickListener { testPrint() }
-        }
-
-        val note = TextView(this).apply {
-            text = "Bluetooth uses the existing classic Bluetooth SPP implementation. " +
-                "USB sends raw ESC/POS data through the Android USB host interface. " +
-                "Wi-Fi uses a TCP connection to the printer, port 9100 by default."
-            textSize = 14f
-            setPadding(0, dp(20), 0, 0)
-        }
-
-        listOf(
-            title, subtitle, statusText, typeLabel, typeRow, happyPetButton,
-            findBluetoothButton, findUsbButton, wifiFields, printerText,
-            selectedText, connectButton, disconnectButton, testButton, note
-        ).forEach { root.addView(it) }
+        connect = Button(this).apply { text = "Connect Printer"; setOnClickListener { connectSelected() } }
+        disconnect = Button(this).apply { text = "Disconnect"; setOnClickListener { disconnectPrinter() } }
+        test = Button(this).apply { text = "TEST PRINT"; setOnClickListener { testPrint() } }
+        root.addView(connect)
+        root.addView(disconnect)
+        root.addView(test)
 
         setContentView(scroll)
-        selectConnectionType(ConnectionType.BLUETOOTH)
+        selectType(ConnectionType.BLUETOOTH)
     }
 
-    private fun registerUsbPermissionReceiver() {
-        val filter = IntentFilter(ACTION_USB_PERMISSION)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            registerReceiver(usbPermissionReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
-        } else {
-            @Suppress("DEPRECATION")
-            registerReceiver(usbPermissionReceiver, filter)
-        }
-    }
-
-    private fun selectConnectionType(type: ConnectionType) {
-        connection?.disconnect()
-        connection = null
-        connectionType = type
-        disconnectButton.isEnabled = false
-        testButton.isEnabled = false
-        connectButton.isEnabled = false
-
-        val bluetooth = type == ConnectionType.BLUETOOTH
-        val usb = type == ConnectionType.USB
-        val wifi = type == ConnectionType.WIFI
-
-        findBluetoothButton.visibility = if (bluetooth) View.VISIBLE else View.GONE
-        findUsbButton.visibility = if (usb) View.VISIBLE else View.GONE
-        wifiFields.visibility = if (wifi) View.VISIBLE else View.GONE
-
-        bluetoothButton.isEnabled = !bluetooth
-        usbButton.isEnabled = !usb
-        wifiButton.isEnabled = !wifi
-
-        printerText.text = when (type) {
-            ConnectionType.BLUETOOTH -> "No paired printer found."
-            ConnectionType.USB -> "No USB printer detected."
-            ConnectionType.WIFI -> "Enter the printer IP address and connect."
-        }
-        selectedText.text = "Selected printer: None"
-
-        when (type) {
-            ConnectionType.BLUETOOTH -> {
-                setStatus("Bluetooth selected.")
-                if (!hasBluetoothPermission()) requestBluetoothPermissionsIfNeeded()
-            }
-            ConnectionType.USB -> {
-                setStatus("USB selected. Connect the printer through OTG and detect it.")
-                detectUsbPrinters()
-            }
-            ConnectionType.WIFI -> setStatus("Wi-Fi selected.")
+    private fun selectType(newType: ConnectionType) {
+        printerConnection?.disconnect()
+        printerConnection = null
+        type = newType
+        bluetoothTab.isEnabled = newType != ConnectionType.BLUETOOTH
+        usbTab.isEnabled = newType != ConnectionType.USB
+        wifiTab.isEnabled = newType != ConnectionType.WIFI
+        bluetoothFind.visibility = if (newType == ConnectionType.BLUETOOTH) View.VISIBLE else View.GONE
+        usbFind.visibility = if (newType == ConnectionType.USB) View.VISIBLE else View.GONE
+        wifiFields.visibility = if (newType == ConnectionType.WIFI) View.VISIBLE else View.GONE
+        connect.isEnabled = newType == ConnectionType.WIFI && ip.text.toString().trim().isNotEmpty()
+        disconnect.isEnabled = false
+        test.isEnabled = false
+        selected.text = "Selected printer: None"
+        when (newType) {
+            ConnectionType.BLUETOOTH -> { setStatus("Bluetooth selected."); details.text = "Find a paired Bluetooth printer." }
+            ConnectionType.USB -> { setStatus("USB selected."); details.text = "Connect the printer through USB OTG."; findUsb() }
+            ConnectionType.WIFI -> { setStatus("Wi-Fi selected."); details.text = "Enter the printer IP address. Port 9100 is the default." }
         }
     }
 
-    private fun requestBluetoothPermissionsIfNeeded() {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return
-
-        val required = mutableListOf<String>()
-        if (ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_SCAN) != PackageManager.PERMISSION_GRANTED) {
-            required.add(Manifest.permission.BLUETOOTH_SCAN)
-        }
-        if (ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED) {
-            required.add(Manifest.permission.BLUETOOTH_CONNECT)
-        }
-
-        if (required.isNotEmpty()) {
-            ActivityCompat.requestPermissions(this, required.toTypedArray(), REQUEST_BLUETOOTH)
-        }
+    private fun requestBluetoothPermission() {
+        if (Build.VERSION.SDK_INT < 31) return
+        val permissions = arrayOf(Manifest.permission.BLUETOOTH_SCAN, Manifest.permission.BLUETOOTH_CONNECT)
+        val missing = permissions.filter { ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED }
+        if (missing.isNotEmpty()) ActivityCompat.requestPermissions(this, missing.toTypedArray(), REQUEST_BLUETOOTH)
     }
 
-    private fun hasBluetoothPermission(): Boolean {
-        return Build.VERSION.SDK_INT < Build.VERSION_CODES.S ||
-            ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED
-    }
+    private fun bluetoothAllowed() = Build.VERSION.SDK_INT < 31 ||
+        ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED
 
-    private fun findPairedBluetoothPrinters() {
-        if (!hasBluetoothPermission()) {
-            requestBluetoothPermissionsIfNeeded()
-            return
-        }
-
+    private fun findBluetooth() {
+        if (!bluetoothAllowed()) { requestBluetoothPermission(); return }
         val adapter = BluetoothAdapter.getDefaultAdapter()
-        if (adapter == null) {
-            setStatus("This Android device does not support Bluetooth.")
+        if (adapter == null) { setStatus("Bluetooth is not supported on this device."); return }
+        if (!adapter.isEnabled) { setStatus("Bluetooth is turned off."); return }
+        val devices = try { adapter.bondedDevices.toList() } catch (_: SecurityException) { emptyList() }
+        if (devices.isEmpty()) {
+            bluetoothDevice = null
+            connect.isEnabled = false
+            details.text = "No paired Bluetooth devices found. Pair the printer in Android settings first."
             return
         }
-        if (!adapter.isEnabled) {
-            setStatus("Bluetooth is turned off. Turn it on and try again.")
-            return
-        }
-
-        val paired = try {
-            adapter.bondedDevices.toList()
-        } catch (_: SecurityException) {
-            setStatus("Bluetooth permission is required.")
-            return
-        }
-
-        if (paired.isEmpty()) {
-            printerText.text = "No paired Bluetooth devices found.\n\nPair the printer from Android Bluetooth settings first."
-            selectedDevice = null
-            connectButton.isEnabled = false
-            return
-        }
-
-        val likelyPrinters = paired.filter {
-            val major = it.bluetoothClass?.majorDeviceClass
-            major == android.bluetooth.BluetoothClass.Device.Major.IMAGING ||
-                major == android.bluetooth.BluetoothClass.Device.Major.PERIPHERAL
-        }
-        val candidates = if (likelyPrinters.isNotEmpty()) likelyPrinters else paired
-
-        printerText.text = candidates.mapIndexed { index, device ->
-            "${index + 1}. ${device.name ?: "Unknown device"}\n${device.address}"
+        bluetoothDevice = devices.first()
+        details.text = devices.mapIndexed { i, d ->
+            val name = try { d.name ?: "Unknown device" } catch (_: SecurityException) { "Unknown device" }
+            "${i + 1}. $name\n${d.address}"
         }.joinToString("\n\n")
-
-        selectedDevice = candidates.first()
-        val name = try { selectedDevice?.name ?: "Unknown" } catch (_: SecurityException) { "Unknown" }
-        selectedText.text = "Selected printer: $name"
-        connectButton.isEnabled = true
+        val name = try { bluetoothDevice?.name ?: "Bluetooth Printer" } catch (_: SecurityException) { "Bluetooth Printer" }
+        selected.text = "Selected printer: $name"
+        connect.isEnabled = true
         setStatus("Bluetooth printer selected.")
     }
 
-    private fun detectUsbPrinters() {
+    private fun findUsb() {
         val devices = usbManager.deviceList.values.toList()
         if (devices.isEmpty()) {
-            selectedUsbDevice = null
-            connectButton.isEnabled = false
-            printerText.text = "No USB device detected. Connect the thermal printer through an OTG adapter and try again."
+            usbDevice = null
+            connect.isEnabled = false
+            details.text = "No USB device detected. Connect the printer through OTG and try again."
             setStatus("No USB device found.")
             return
         }
-
-        val candidates = devices.mapNotNull { device ->
-            val printerInterface = UsbPrinterConnection.findPrinterInterface(device)
-            if (printerInterface != null) Triple(device, printerInterface.first, printerInterface.second) else null
-        }
-
-        if (candidates.isEmpty()) {
-            selectedUsbDevice = null
-            connectButton.isEnabled = false
-            printerText.text = "USB devices were found, but no bulk OUT printer interface was detected."
-            setStatus("No compatible USB printer interface found.")
+        val candidate = devices.firstOrNull { UsbPrinterConnection.findPrinterInterface(it) != null }
+        if (candidate == null) {
+            usbDevice = null
+            connect.isEnabled = false
+            details.text = "USB devices were found, but no compatible bulk OUT printer interface was detected."
+            setStatus("No compatible USB printer found.")
             return
         }
+        usbDevice = candidate
+        val name = candidate.productName ?: candidate.deviceName ?: "USB Printer"
+        details.text = "USB printer\nVID: ${candidate.vendorId}\nPID: ${candidate.productId}"
+        selected.text = "Selected printer: $name"
+        connect.isEnabled = true
+        setStatus(if (usbManager.hasPermission(candidate)) "USB permission already granted." else "USB printer detected. Tap Connect Printer for permission.")
+    }
 
-        val selected = candidates.first()
-        selectedUsbDevice = selected.first
-        val device = selected.first
-        val name = device.productName ?: device.deviceName ?: "USB Printer"
-        printerText.text = candidates.mapIndexed { index, item ->
-            val itemName = item.first.productName ?: item.first.deviceName ?: "USB Printer"
-            "${index + 1}. $itemName\nVID: ${item.first.vendorId}  PID: ${item.first.productId}"
-        }.joinToString("\n\n")
-        selectedText.text = "Selected printer: $name"
-        connectButton.isEnabled = true
-
-        if (usbManager.hasPermission(device)) {
-            setStatus("USB printer detected and permission already granted.")
-        } else {
-            setStatus("USB printer detected. Connect to request permission.")
+    private fun connectSelected() {
+        when (type) {
+            ConnectionType.BLUETOOTH -> connectBluetooth()
+            ConnectionType.USB -> connectUsb()
+            ConnectionType.WIFI -> connectWifi()
         }
     }
 
-    private fun connectSelectedUsbDevice() {
-        val device = selectedUsbDevice ?: run {
-            setStatus("Detect a USB printer first.")
-            return
-        }
-
-        val printerInterface = UsbPrinterConnection.findPrinterInterface(device)
-        if (printerInterface == null) {
-            setStatus("The selected USB device has no compatible printer interface.")
-            return
-        }
-
-        if (!usbManager.hasPermission(device)) {
-            val flags = PendingIntent.FLAG_UPDATE_CURRENT or
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) PendingIntent.FLAG_IMMUTABLE else 0
-            val permissionIntent = PendingIntent.getBroadcast(
-                this,
-                device.deviceId,
-                Intent(ACTION_USB_PERMISSION).setPackage(packageName),
-                flags
-            )
-            setStatus("Requesting USB printer permission...")
-            usbManager.requestPermission(device, permissionIntent)
-            return
-        }
-
-        val usbConnection = usbManager.openDevice(device)
-        if (usbConnection == null) {
-            setStatus("Android could not open the USB printer.")
-            return
-        }
-
-        val name = device.productName ?: device.deviceName ?: "USB Printer"
-        connection?.disconnect()
-        setStatus("Connecting to $name...")
-
-        connection = UsbPrinterConnection(
-            connection = usbConnection,
-            printerInterface = printerInterface.first,
-            outEndpoint = printerInterface.second,
-            onConnected = {
-                runOnUiThread {
-                    setStatus("Connected to $name")
-                    connectButton.isEnabled = false
-                    disconnectButton.isEnabled = true
-                    testButton.isEnabled = true
-                }
-            },
-            onDisconnected = {
-                runOnUiThread {
-                    setStatus("Disconnected")
-                    connectButton.isEnabled = selectedUsbDevice != null
-                    disconnectButton.isEnabled = false
-                    testButton.isEnabled = false
-                }
-            },
-            onError = { error ->
-                runOnUiThread {
-                    setStatus("USB error: $error")
-                    connectButton.isEnabled = true
-                    disconnectButton.isEnabled = false
-                    testButton.isEnabled = false
-                }
-            }
-        )
-        connection?.connect()
-    }
-
-    private fun connectSelectedPrinter() {
-        when (connectionType) {
-            ConnectionType.BLUETOOTH -> connectSelectedBluetoothPrinter()
-            ConnectionType.USB -> connectSelectedUsbDevice()
-            ConnectionType.WIFI -> connectWifiPrinter()
-        }
-    }
-
-    private fun connectSelectedBluetoothPrinter() {
-        val device = selectedDevice ?: run {
-            setStatus("Find a Bluetooth printer first.")
-            return
-        }
-        if (!hasBluetoothPermission()) {
-            requestBluetoothPermissionsIfNeeded()
-            return
-        }
-
-        connection?.disconnect()
+    private fun connectBluetooth() {
+        val device = bluetoothDevice ?: return setStatus("Find a Bluetooth printer first.")
+        if (!bluetoothAllowed()) { requestBluetoothPermission(); return }
         val name = try { device.name ?: "Bluetooth Printer" } catch (_: SecurityException) { "Bluetooth Printer" }
         setStatus("Connecting to $name...")
-
-        connection = BluetoothPrinterConnection(
-            device = device,
-            onConnected = {
-                runOnUiThread {
-                    setStatus("Connected to $name")
-                    connectButton.isEnabled = false
-                    disconnectButton.isEnabled = true
-                    testButton.isEnabled = true
-                }
-            },
-            onDisconnected = {
-                runOnUiThread {
-                    setStatus("Disconnected")
-                    connectButton.isEnabled = selectedDevice != null
-                    disconnectButton.isEnabled = false
-                    testButton.isEnabled = false
-                }
-            },
-            onError = { error ->
-                runOnUiThread {
-                    setStatus("Bluetooth error: $error")
-                    connectButton.isEnabled = true
-                    disconnectButton.isEnabled = false
-                    testButton.isEnabled = false
-                }
-            }
-        )
-        connection?.connect()
+        printerConnection = BluetoothPrinterConnection(device, { connected("Bluetooth", name) }, { disconnected() }, { error("Bluetooth", it) })
+        printerConnection?.connect()
     }
 
-    private fun connectWifiPrinter() {
-        val host = ipEditText.text.toString().trim()
-        if (host.isBlank()) {
-            setStatus("Enter the Wi-Fi printer IP address.")
+    private fun connectUsb() {
+        val device = usbDevice ?: return setStatus("Detect a USB printer first.")
+        val endpoint = UsbPrinterConnection.findPrinterInterface(device) ?: return setStatus("No compatible USB printer interface found.")
+        if (!usbManager.hasPermission(device)) {
+            val flags = PendingIntent.FLAG_UPDATE_CURRENT or if (Build.VERSION.SDK_INT >= 23) PendingIntent.FLAG_IMMUTABLE else 0
+            val intent = PendingIntent.getBroadcast(this, device.deviceId, Intent(ACTION_USB_PERMISSION).setPackage(packageName), flags)
+            setStatus("Requesting USB printer permission...")
+            usbManager.requestPermission(device, intent)
             return
         }
+        val usbConnection = usbManager.openDevice(device) ?: return setStatus("Android could not open the USB printer.")
+        val name = device.productName ?: device.deviceName ?: "USB Printer"
+        printerConnection = UsbPrinterConnection(usbConnection, endpoint.first, endpoint.second, { connected("USB", name) }, { disconnected() }, { error("USB", it) })
+        setStatus("Connecting to $name...")
+        printerConnection?.connect()
+    }
 
-        val port = portEditText.text.toString().trim().toIntOrNull() ?: 9100
-        if (port !in 1..65535) {
-            setStatus("Enter a valid port between 1 and 65535.")
-            return
-        }
+    private fun connectWifi() {
+        val host = ip.text.toString().trim()
+        if (host.isEmpty()) return setStatus("Enter the Wi-Fi printer IP address.")
+        val printerPort = port.text.toString().trim().toIntOrNull() ?: 9100
+        if (printerPort !in 1..65535) return setStatus("Enter a valid port between 1 and 65535.")
+        printerConnection = WifiPrinterConnection(host, printerPort, { connected("Wi-Fi", "$host:$printerPort") }, { disconnected() }, { error("Wi-Fi", it) })
+        setStatus("Connecting to $host:$printerPort...")
+        printerConnection?.connect()
+    }
 
-        connection?.disconnect()
-        setStatus("Connecting to $host:$port...")
+    private fun connected(kind: String, name: String) = runOnUiThread {
+        setStatus("Connected to $name")
+        selected.text = "Selected printer: $name ($kind)"
+        connect.isEnabled = false
+        disconnect.isEnabled = true
+        test.isEnabled = true
+    }
 
-        connection = WifiPrinterConnection(
-            host = host,
-            port = port,
-            onConnected = {
-                runOnUiThread {
-                    setStatus("Connected to $host:$port")
-                    selectedText.text = "Selected printer: $host:$port"
-                    printerText.text = "Wi-Fi printer\nIP: $host\nPort: $port"
-                    connectButton.isEnabled = false
-                    disconnectButton.isEnabled = true
-                    testButton.isEnabled = true
-                }
-            },
-            onDisconnected = {
-                runOnUiThread {
-                    setStatus("Disconnected")
-                    connectButton.isEnabled = true
-                    disconnectButton.isEnabled = false
-                    testButton.isEnabled = false
-                }
-            },
-            onError = { error ->
-                runOnUiThread {
-                    setStatus("Wi-Fi error: $error")
-                    connectButton.isEnabled = true
-                    disconnectButton.isEnabled = false
-                    testButton.isEnabled = false
-                }
-            }
-        )
-        connection?.connect()
+    private fun disconnected() = runOnUiThread {
+        setStatus("Disconnected")
+        connect.isEnabled = true
+        disconnect.isEnabled = false
+        test.isEnabled = false
+    }
+
+    private fun error(kind: String, message: String) = runOnUiThread {
+        setStatus("$kind error: $message")
+        connect.isEnabled = true
+        disconnect.isEnabled = false
+        test.isEnabled = false
     }
 
     private fun disconnectPrinter() {
-        connection?.disconnect()
-        connection = null
+        printerConnection?.disconnect()
+        printerConnection = null
     }
 
     private fun testPrint() {
-        val active = connection
-        if (active == null || !active.isConnected) {
-            setStatus("Printer is not connected.")
-            return
-        }
-
-        val printerName: String
-        val connectionName: String
-
-        when (connectionType) {
-            ConnectionType.BLUETOOTH -> {
-                printerName = try { selectedDevice?.name ?: "Bluetooth Printer" } catch (_: SecurityException) { "Bluetooth Printer" }
-                connectionName = "Bluetooth"
-            }
-            ConnectionType.USB -> {
-                printerName = selectedUsbDevice?.productName ?: selectedUsbDevice?.deviceName ?: "USB Printer"
-                connectionName = "USB"
-            }
-            ConnectionType.WIFI -> {
-                printerName = ipEditText.text.toString().trim()
-                connectionName = "Wi-Fi"
-            }
-        }
-
-        setStatus("Sending test print...")
-        val bytes = EscPosTestReceipt.create(
-            printerName = printerName,
-            connection = connectionName
-        )
-        active.print(bytes)
-        setStatus("Test print command sent. Check the printer.")
+        val connection = printerConnection ?: return setStatus("Printer is not connected.")
+        if (!connection.isConnected) return setStatus("Printer is not connected.")
+        val name = selected.text.toString().removePrefix("Selected printer: ").substringBefore(" (").ifBlank { "Printer" }
+        connection.print(EscPosTestReceipt.create(name, type.name.replace('_', ' ')))
+        setStatus("Test print command sent.")
         Toast.makeText(this, "Test print sent", Toast.LENGTH_SHORT).show()
     }
 
-    private fun showComingSoon(message: String) {
-        Toast.makeText(this, message, Toast.LENGTH_LONG).show()
+    private fun registerUsbReceiver() {
+        val filter = IntentFilter(ACTION_USB_PERMISSION)
+        if (Build.VERSION.SDK_INT >= 33) registerReceiver(usbReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
+        else @Suppress("DEPRECATION") registerReceiver(usbReceiver, filter)
     }
 
-    private fun setStatus(value: String) {
-        statusText.text = "Status: $value"
+    private fun setStatus(message: String) {
+        if (::status.isInitialized) status.text = "Status: $message"
     }
 
-    private fun dp(value: Int): Int =
-        (value * resources.displayMetrics.density).toInt()
+    private fun dp(value: Int) = (value * resources.displayMetrics.density).toInt()
 }
