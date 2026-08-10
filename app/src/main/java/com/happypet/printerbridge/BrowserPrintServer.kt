@@ -15,10 +15,7 @@ import java.net.Socket
 import java.nio.charset.StandardCharsets
 import java.util.concurrent.Executors
 
-/**
- * HTTP bridge between Happy Pet Web and the existing printer connection layer.
- * The Bluetooth transport implementation itself is not modified here.
- */
+/** HTTP bridge between Happy Pet Web and the existing printer connection layer. */
 class BrowserPrintServer(private val context: Context) {
     companion object { const val DEFAULT_PORT = 18181 }
 
@@ -28,6 +25,7 @@ class BrowserPrintServer(private val context: Context) {
     @Volatile private var activePrinter: PrinterConnection? = null
     @Volatile private var activePrinterName: String? = null
     @Volatile private var activePrinterAddress: String? = null
+    @Volatile private var activePrinterType: String? = null
 
     fun start(port: Int = DEFAULT_PORT) {
         if (running) return
@@ -75,12 +73,15 @@ class BrowserPrintServer(private val context: Context) {
             val body = String(chars)
 
             when {
+                method == "GET" && path == "/" -> sendHtml(client)
+                method == "GET" && path == "/test" -> sendHtml(client)
                 method == "GET" && path == "/api/v1/status" -> send(client, 200, status())
                 method == "GET" && path == "/api/v1/printers" -> send(client, 200, pairedPrinters())
                 method == "POST" && path == "/api/v1/printer/connect" -> connect(body, client)
                 method == "POST" && path == "/api/v1/printer/disconnect" -> { disconnectPrinter(); send(client, 200, status()) }
+                method == "POST" && path == "/api/v1/test-print" -> testPrint(client)
                 method == "POST" && path == "/api/v1/print" -> print(body, client)
-                else -> send(client, 404, "{\"ok\":false,\"error\":\"ENDPOINT_NOT_FOUND\"}")
+                else -> send(client, 404, error("ENDPOINT_NOT_FOUND"))
             }
         }
     }
@@ -98,15 +99,25 @@ class BrowserPrintServer(private val context: Context) {
 
         disconnectPrinter()
         val name = try { device.name ?: "Bluetooth Printer" } catch (_: SecurityException) { "Bluetooth Printer" }
-        val connection = BluetoothPrinterConnection(device, { }, { }, { })
+        val connection = BluetoothPrinterConnection(device, {
+            activePrinterType = "Bluetooth"
+        }, {
+            activePrinter = null
+            activePrinterName = null
+            activePrinterAddress = null
+            activePrinterType = null
+        }, { message ->
+            if (activePrinter === connection) activePrinterType = "Bluetooth"
+        })
         activePrinter = connection
         activePrinterName = name
         activePrinterAddress = device.address
+        activePrinterType = "Bluetooth"
 
         executor.execute {
-            try { connection.connect() } catch (_: Exception) { disconnectPrinter() }
+            try { connection.connect() } catch (_: Exception) { if (activePrinter === connection) disconnectPrinter() }
         }
-        send(socket, 202, "{\"ok\":true,\"success\":true,\"status\":\"CONNECTING\",\"printer\":${quote(name)}}")
+        send(socket, 202, "{\"ok\":true,\"success\":true,\"status\":\"CONNECTING\",\"printer\":${quote(name)},\"address\":${quote(device.address)}}")
     }
 
     private fun print(body: String, socket: Socket) {
@@ -123,20 +134,34 @@ class BrowserPrintServer(private val context: Context) {
         }
     }
 
+    private fun testPrint(socket: Socket) {
+        val printer = activePrinter
+        if (printer == null || !printer.isConnected) return send(socket, 409, error("PRINTER_NOT_CONNECTED"))
+        try {
+            printer.print(EscPosTestReceipt.create(activePrinterName ?: "Bluetooth Printer", "Browser Bridge"))
+            send(socket, 200, "{\"ok\":true,\"success\":true,\"printer\":${quote(activePrinterName)}}")
+        } catch (e: Exception) {
+            send(socket, 500, "{\"ok\":false,\"success\":false,\"error\":\"PRINT_FAILED\",\"message\":${quote(e.message)}}")
+        }
+    }
+
     private fun disconnectPrinter() {
         try { activePrinter?.disconnect() } catch (_: Exception) {}
-        activePrinter = null; activePrinterName = null; activePrinterAddress = null
+        activePrinter = null
+        activePrinterName = null
+        activePrinterAddress = null
+        activePrinterType = null
     }
 
     private fun status(): String {
         val connected = activePrinter?.isConnected == true
-        return "{\"ok\":true,\"serverRunning\":$running,\"bridgePort\":$DEFAULT_PORT,\"printer\":{\"connected\":$connected,\"name\":${quote(activePrinterName)},\"address\":${quote(activePrinterAddress)}},\"urls\":[${localUrls().joinToString(",") { quote(it) }}]}"
+        return "{\"ok\":true,\"serverRunning\":${isRunning()},\"bridgePort\":$DEFAULT_PORT,\"printer\":{\"connected\":$connected,\"name\":${quote(activePrinterName)},\"address\":${quote(activePrinterAddress)},\"type\":${quote(activePrinterType)}},\"urls\":[${localUrls().joinToString(",") { quote(it) }}]}"
     }
 
     private fun pairedPrinters(): String {
         val adapter = BluetoothAdapter.getDefaultAdapter() ?: return "{\"ok\":false,\"printers\":[],\"error\":\"BLUETOOTH_NOT_SUPPORTED\"}"
         if (Build.VERSION.SDK_INT >= 31 && context.checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED) return "{\"ok\":false,\"printers\":[],\"error\":\"BLUETOOTH_PERMISSION_REQUIRED\"}"
-        val devices = try { adapter.bondedDevices.toList() } catch (_: Exception) { emptyList() }
+        val devices = try { adapter.bondedDevices.toList().sortedBy { (try { it.name } catch (_: Exception) { null }) ?: "" } } catch (_: Exception) { emptyList() }
         val json = devices.joinToString(",") { d ->
             val name = try { d.name ?: "Unknown" } catch (_: SecurityException) { "Unknown" }
             "{\"name\":${quote(name)},\"address\":${quote(d.address)}}"
@@ -153,6 +178,26 @@ class BrowserPrintServer(private val context: Context) {
             }
         } catch (_: Exception) {}
         return result.distinct()
+    }
+
+    private fun sendHtml(socket: Socket) {
+        val html = """
+<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'><title>Happy Pet Printer Bridge</title>
+<style>body{font-family:Arial,sans-serif;max-width:720px;margin:30px auto;padding:0 18px}button{padding:12px 16px;margin:5px 0;width:100%}pre{background:#f4f4f4;padding:12px;white-space:pre-wrap}.ok{font-weight:bold}</style></head>
+<body><h2>Happy Pet Printer Bridge</h2><p id='status'>Checking bridge...</p><button onclick='loadPrinters()'>Find Paired Printers</button><div id='printers'></div><button onclick='testPrint()'>Send ESC/POS Test Print</button><pre id='result'></pre>
+<script>
+const api=location.origin;
+async function apiCall(path,options={}){const r=await fetch(api+path,options);const j=await r.json();document.getElementById('result').textContent=JSON.stringify(j,null,2);return j}
+async function status(){const j=await apiCall('/api/v1/status');document.getElementById('status').textContent='Bridge: '+(j.serverRunning?'RUNNING':'STOPPED')+' | Printer: '+(j.printer.connected?'CONNECTED':'NOT CONNECTED')+' | '+(j.printer.name||'None')}
+async function loadPrinters(){const j=await apiCall('/api/v1/printers');const box=document.getElementById('printers');box.innerHTML='';(j.printers||[]).forEach(p=>{const b=document.createElement('button');b.textContent='Connect: '+p.name+' ('+p.address+')';b.onclick=()=>connect(p.address);box.appendChild(b)})}
+async function connect(address){await apiCall('/api/v1/printer/connect',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({address})});setTimeout(status,1200)}
+async function testPrint(){await apiCall('/api/v1/test-print',{method:'POST'});setTimeout(status,500)}
+status();
+</script></body></html>
+""".trimIndent()
+        val bytes = html.toByteArray(StandardCharsets.UTF_8)
+        val response = "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: ${bytes.size}\r\nConnection: close\r\n\r\n"
+        val out = socket.getOutputStream(); out.write(response.toByteArray(StandardCharsets.UTF_8)); out.write(bytes); out.flush()
     }
 
     private fun jsonValue(body: String, key: String): String? = Regex("\\\"${Regex.escape(key)}\\\"\\s*:\\s*\\\"([^\\\"]+)\\\"").find(body)?.groupValues?.get(1)
