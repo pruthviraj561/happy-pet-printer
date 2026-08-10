@@ -1,6 +1,10 @@
 package com.happypet.printerbridge
 
+import android.Manifest
+import android.bluetooth.BluetoothAdapter
+import android.os.Build
 import android.content.Context
+import android.content.pm.PackageManager
 import java.io.BufferedReader
 import java.io.InputStreamReader
 import java.net.InetAddress
@@ -9,12 +13,17 @@ import java.net.ServerSocket
 import java.net.Socket
 import java.nio.charset.StandardCharsets
 import java.util.Base64
+import java.util.UUID
 import java.util.concurrent.Executors
 
-/** Local/LAN HTTP bridge. It delegates actual printer I/O to PrinterConnection. */
+/**
+ * HTTP bridge between Happy Pet Web and the existing printer connection layer.
+ * The Bluetooth transport implementation itself is not modified here.
+ */
 class BrowserPrintServer(private val context: Context) {
     companion object {
         const val DEFAULT_PORT = 18181
+        private val SPP_UUID: UUID = UUID.fromString("00001101-0000-1000-8000-00805F9B34FB")
     }
 
     private val executor = Executors.newCachedThreadPool()
@@ -22,7 +31,7 @@ class BrowserPrintServer(private val context: Context) {
     @Volatile private var serverSocket: ServerSocket? = null
     @Volatile private var activePrinter: PrinterConnection? = null
     @Volatile private var activePrinterName: String? = null
-    @Volatile private var activePrinterType: String? = null
+    @Volatile private var activePrinterAddress: String? = null
 
     fun start(port: Int = DEFAULT_PORT) {
         if (running) return
@@ -44,23 +53,10 @@ class BrowserPrintServer(private val context: Context) {
         running = false
         try { serverSocket?.close() } catch (_: Exception) {}
         serverSocket = null
+        disconnectPrinter()
     }
 
     fun isRunning() = running && serverSocket?.isClosed == false
-
-    fun setActivePrinter(connection: PrinterConnection?, name: String?, type: String?) {
-        activePrinter = connection
-        activePrinterName = name
-        activePrinterType = type
-    }
-
-    fun clearActivePrinter(connection: PrinterConnection? = null) {
-        if (connection == null || activePrinter === connection) {
-            activePrinter = null
-            activePrinterName = null
-            activePrinterType = null
-        }
-    }
 
     private fun handle(socket: Socket) {
         socket.use { client ->
@@ -86,44 +82,95 @@ class BrowserPrintServer(private val context: Context) {
 
             when {
                 method == "GET" && path == "/api/v1/status" -> send(client, 200, status())
-                method == "POST" && path == "/api/v1/print" -> print(body, client)
-                method == "POST" && path == "/api/v1/disconnect" -> {
-                    activePrinter?.disconnect(); clearActivePrinter(); send(client, 200, status())
+                method == "GET" && path == "/api/v1/printers" -> send(client, 200, pairedPrinters())
+                method == "POST" && path == "/api/v1/printer/connect" -> connect(body, client)
+                method == "POST" && path == "/api/v1/printer/disconnect" -> {
+                    disconnectPrinter(); send(client, 200, status())
                 }
+                method == "POST" && path == "/api/v1/print" -> print(body, client)
                 else -> send(client, 404, "{\"ok\":false,\"error\":\"ENDPOINT_NOT_FOUND\"}")
             }
         }
     }
 
+    private fun connect(body: String, socket: Socket) {
+        val address = jsonValue(body, "address")?.trim()
+            ?: return send(socket, 400, error("BLUETOOTH_ADDRESS_REQUIRED"))
+        val adapter = BluetoothAdapter.getDefaultAdapter()
+            ?: return send(socket, 503, error("BLUETOOTH_NOT_SUPPORTED"))
+        if (Build.VERSION.SDK_INT >= 31 && context.checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED) {
+            return send(socket, 403, error("BLUETOOTH_PERMISSION_REQUIRED"))
+        }
+        val device = try { adapter.getRemoteDevice(address) } catch (_: Exception) { null }
+            ?: return send(socket, 400, error("INVALID_BLUETOOTH_ADDRESS"))
+
+        disconnectPrinter()
+        val name = try { device.name ?: "Bluetooth Printer" } catch (_: SecurityException) { "Bluetooth Printer" }
+        val connection = BluetoothPrinterConnection(
+            device,
+            onConnected = { },
+            onDisconnected = { },
+            onError = { }
+        )
+        activePrinter = connection
+        activePrinterName = name
+        activePrinterAddress = device.address
+
+        executor.execute {
+            try { connection.connect() } catch (_: Exception) { disconnectPrinter() }
+        }
+        send(socket, 202, "{\"ok\":true,\"success\":true,\"status\":\"CONNECTING\",\"printer\":${quote(name)}}")
+    }
+
     private fun print(body: String, socket: Socket) {
-        val data = jsonValue(body, "dataBase64")
-            ?: return send(socket, 400, "{\"ok\":false,\"error\":\"DATA_REQUIRED\"}")
         val printer = activePrinter
         if (printer == null || !printer.isConnected) {
-            return send(socket, 409, "{\"ok\":false,\"error\":\"PRINTER_NOT_CONNECTED\"}")
+            return send(socket, 409, error("PRINTER_NOT_CONNECTED"))
         }
+        val data = jsonValue(body, "dataBase64")
+            ?: return send(socket, 400, error("DATA_REQUIRED"))
         val bytes = try { Base64.getDecoder().decode(data) } catch (_: Exception) { null }
-            ?: return send(socket, 400, "{\"ok\":false,\"error\":\"INVALID_BASE64\"}")
+            ?: return send(socket, 400, error("INVALID_BASE64"))
         try {
             printer.print(bytes)
             send(socket, 200, "{\"ok\":true,\"success\":true,\"bytes\":${bytes.size},\"printer\":${quote(activePrinterName)}}")
         } catch (e: Exception) {
-            send(socket, 500, "{\"ok\":false,\"error\":\"PRINT_FAILED\",\"message\":${quote(e.message)}}")
+            send(socket, 500, "{\"ok\":false,\"success\":false,\"error\":\"PRINT_FAILED\",\"message\":${quote(e.message)}}")
         }
+    }
+
+    private fun disconnectPrinter() {
+        try { activePrinter?.disconnect() } catch (_: Exception) {}
+        activePrinter = null
+        activePrinterName = null
+        activePrinterAddress = null
     }
 
     private fun status(): String {
         val connected = activePrinter?.isConnected == true
-        val urls = localUrls().joinToString(",") { quote(it) }
-        return "{\"ok\":true,\"serverRunning\":$running,\"urls\":[$urls],\"printer\":{\"connected\":$connected,\"name\":${quote(activePrinterName)},\"type\":${quote(activePrinterType)}}}"
+        return "{\"ok\":true,\"serverRunning\":$running,\"bridgePort\":$DEFAULT_PORT,\"printer\":{\"connected\":$connected,\"name\":${quote(activePrinterName)},\"address\":${quote(activePrinterAddress)}},\"urls\":[${localUrls().joinToString(",") { quote(it) }}]}"
+    }
+
+    private fun pairedPrinters(): String {
+        val adapter = BluetoothAdapter.getDefaultAdapter()
+            ?: return "{\"ok\":false,\"printers\":[],\"error\":\"BLUETOOTH_NOT_SUPPORTED\"}"
+        if (Build.VERSION.SDK_INT >= 31 && context.checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED) {
+            return "{\"ok\":false,\"printers\":[],\"error\":\"BLUETOOTH_PERMISSION_REQUIRED\"}"
+        }
+        val devices = try { adapter.bondedDevices.toList() } catch (_: Exception) { emptyList() }
+        val json = devices.joinToString(",") { d ->
+            val name = try { d.name ?: "Unknown" } catch (_: SecurityException) { "Unknown" }
+            "{\"name\":${quote(name)},\"address\":${quote(d.address)}}"
+        }
+        return "{\"ok\":true,\"printers\":[$json]}"
     }
 
     private fun localUrls(): List<String> {
         val result = mutableListOf("http://127.0.0.1:$DEFAULT_PORT")
         try {
-            NetworkInterface.getNetworkInterfaces()?.toList()?.forEach { n ->
-                if (!n.isUp || n.isLoopback) return@forEach
-                n.inetAddresses.toList().filter { it is java.net.Inet4Address && !it.isLoopbackAddress }.forEach {
+            NetworkInterface.getNetworkInterfaces()?.toList()?.forEach { network ->
+                if (!network.isUp || network.isLoopback) return@forEach
+                network.inetAddresses.toList().filter { it is java.net.Inet4Address && !it.isLoopbackAddress }.forEach {
                     result.add("http://${it.hostAddress}:$DEFAULT_PORT")
                 }
             }
@@ -135,11 +182,17 @@ class BrowserPrintServer(private val context: Context) {
         Regex("\\\"${Regex.escape(key)}\\\"\\s*:\\s*\\\"([^\\\"]+)\\\"").find(body)?.groupValues?.get(1)
 
     private fun quote(value: String?): String = value?.let { "\"${it.replace("\\", "\\\\").replace("\"", "\\\"")}\"" } ?: "null"
+    private fun error(code: String) = "{\"ok\":false,\"success\":false,\"error\":\"$code\"}"
 
     private fun send(socket: Socket, code: Int, body: String) {
         val bytes = body.toByteArray(StandardCharsets.UTF_8)
-        val reason = when (code) { 200 -> "OK"; 400 -> "Bad Request"; 404 -> "Not Found"; 409 -> "Conflict"; 500 -> "Internal Server Error"; else -> "Error" }
-        val response = "HTTP/1.1 $code $reason\r\nContent-Type: application/json; charset=utf-8\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET,POST,OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type\r\nContent-Length: ${bytes.size}\r\nConnection: close\r\n\r\n"
+        val reason = when (code) { 200 -> "OK"; 202 -> "Accepted"; 400 -> "Bad Request"; 403 -> "Forbidden"; 404 -> "Not Found"; 409 -> "Conflict"; 500 -> "Internal Server Error"; 503 -> "Service Unavailable"; else -> "Error" }
+        val response = "HTTP/1.1 $code $reason\r\n" +
+            "Content-Type: application/json; charset=utf-8\r\n" +
+            "Access-Control-Allow-Origin: *\r\n" +
+            "Access-Control-Allow-Methods: GET,POST,OPTIONS\r\n" +
+            "Access-Control-Allow-Headers: Content-Type\r\n" +
+            "Content-Length: ${bytes.size}\r\nConnection: close\r\n\r\n"
         val out = socket.getOutputStream()
         out.write(response.toByteArray(StandardCharsets.UTF_8)); out.write(bytes); out.flush()
     }
