@@ -15,21 +15,37 @@ class BluetoothPrinterConnection(
     companion object {
         val SPP_UUID: UUID = UUID.fromString("00001101-0000-1000-8000-00805F9B34FB")
     }
+
     private var socket: BluetoothSocket? = null
     override val isConnected: Boolean get() = socket?.isConnected == true
 
     override fun connect() {
         Thread {
+            var lastError: Exception? = null
             try {
                 BluetoothAdapter.getDefaultAdapter()?.cancelDiscovery()
-                val s = device.createRfcommSocketToServiceRecord(SPP_UUID)
-                s.connect()
+
+                // Keep the normal SPP connection as the first attempt.
+                var s = device.createRfcommSocketToServiceRecord(SPP_UUID)
+                try {
+                    s.connect()
+                } catch (first: Exception) {
+                    lastError = first
+                    try { s.close() } catch (_: Exception) {}
+
+                    // Some thermal printers advertise SPP but fail the secure
+                    // RFCOMM connection. Retry using the insecure SPP channel.
+                    s = device.createInsecureRfcommSocketToServiceRecord(SPP_UUID)
+                    s.connect()
+                }
+
                 socket = s
                 onConnected()
             } catch (e: Exception) {
                 try { socket?.close() } catch (_: Exception) {}
                 socket = null
-                onError(e.message ?: "Bluetooth connection failed")
+                val message = e.message ?: lastError?.message ?: "Bluetooth connection failed"
+                onError(message)
             }
         }.start()
     }
