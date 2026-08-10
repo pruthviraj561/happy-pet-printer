@@ -9,7 +9,7 @@
         android:usesPermissionFlags="neverForLocation" />
     <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
 
-    <!-- Wi-Fi printer connections use a TCP socket. -->
+    <!-- Local/LAN browser bridge and Wi-Fi printer connections. -->
     <uses-permission android:name="android.permission.INTERNET" />
 
     <uses-feature
@@ -21,6 +21,7 @@
         android:required="false" />
 
     <application
+        android:name=".PrinterBridgeApplication"
         android:allowBackup="true"
         android:label="Happy Pet Printer"
         android:supportsRtl="true"
