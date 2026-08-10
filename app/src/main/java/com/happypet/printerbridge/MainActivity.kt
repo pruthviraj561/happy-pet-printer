@@ -195,24 +195,66 @@ class MainActivity : ComponentActivity() {
     private fun findBluetooth() {
         if (!bluetoothAllowed()) { requestBluetoothPermission(); return }
         val adapter = BluetoothAdapter.getDefaultAdapter()
-        if (adapter == null) { setStatus("Bluetooth is not supported on this device."); return }
-        if (!adapter.isEnabled) { setStatus("Bluetooth is turned off."); return }
-        val devices = try { adapter.bondedDevices.toList() } catch (_: SecurityException) { emptyList() }
+            ?: return setStatus("Bluetooth is not supported on this device.")
+        if (!adapter.isEnabled) return setStatus("Bluetooth is turned off.")
+
+        val devices = try {
+            adapter.bondedDevices.toList().sortedWith(
+                compareBy({ !isLikelyPrinter(it) }, { safeName(it).lowercase() })
+            )
+        } catch (_: SecurityException) { emptyList() }
+
         if (devices.isEmpty()) {
             bluetoothDevice = null
             connect.isEnabled = false
             details.text = "No paired Bluetooth devices found. Pair the printer in Android settings first."
+            selected.text = "Selected printer: None"
             return
         }
-        bluetoothDevice = devices.first()
-        details.text = devices.mapIndexed { i, d ->
-            val name = try { d.name ?: "Unknown device" } catch (_: SecurityException) { "Unknown device" }
-            "${i + 1}. $name\n${d.address}"
-        }.joinToString("\n\n")
-        val name = try { bluetoothDevice?.name ?: "Bluetooth Printer" } catch (_: SecurityException) { "Bluetooth Printer" }
-        selected.text = "Selected printer: $name"
-        connect.isEnabled = true
-        setStatus("Bluetooth printer selected.")
+
+        showBluetoothPicker(devices)
+    }
+
+    private fun showBluetoothPicker(devices: List<BluetoothDevice>) {
+        val labels = devices.map { device ->
+            val name = safeName(device)
+            if (isLikelyPrinter(device)) "$name (printer candidate)" else name
+        }.toTypedArray()
+
+        val currentIndex = devices.indexOf(bluetoothDevice).takeIf { it >= 0 } ?: -1
+        val builder = android.app.AlertDialog.Builder(this)
+            .setTitle("Select Bluetooth printer")
+            .setSingleChoiceItems(labels, currentIndex) { dialog, which ->
+                bluetoothDevice = devices[which]
+                val name = safeName(bluetoothDevice)
+                selected.text = "Selected printer: $name"
+                details.text = devices.mapIndexed { i, d ->
+                    "${i + 1}. ${safeName(d)}\n${safeAddress(d)}"
+                }.joinToString("\n\n")
+                connect.isEnabled = true
+                setStatus("Bluetooth printer selected: $name")
+                dialog.dismiss()
+            }
+            .setNegativeButton("Cancel", null)
+        builder.show()
+    }
+
+    private fun isLikelyPrinter(device: BluetoothDevice): Boolean {
+        val value = safeName(device).lowercase()
+        return listOf("printer", "thermal", "pos", "receipt", "xprinter", "olivetti", "veer", "b41", "print")
+            .any { value.contains(it) }
+    }
+
+    private fun safeName(device: BluetoothDevice?): String = try {
+        device?.name ?: "Unknown Bluetooth device"
+    } catch (_: SecurityException) {
+        "Bluetooth device"
+    }
+
+    private fun safeAddress(device: BluetoothDevice?): String = try {
+        device?.address ?: "Unknown address"
+    } catch (_: SecurityException) {
+        "Unknown address"
     }
 
     private fun findUsb() {
@@ -225,33 +267,22 @@ class MainActivity : ComponentActivity() {
             return
         }
 
-        // First show every device visible to Android. This is intentionally not
-        // restricted to printer-class interfaces so we can diagnose VID/PID issues.
         val deviceLines = devices.mapIndexed { index, device ->
             val manufacturer = try { device.manufacturerName ?: "Unknown" } catch (_: Exception) { "Unknown" }
             val product = try { device.productName ?: device.deviceName ?: "Unknown" } catch (_: Exception) { device.deviceName ?: "Unknown" }
             val printerId = device.vendorId == PRINTER_VENDOR_ID && device.productId == PRINTER_PRODUCT_ID
             val marker = if (printerId) " <-- VEER / OLIVETTI VID/PID" else ""
-            "${index + 1}. $product$marker\n" +
-                "Manufacturer: $manufacturer\n" +
-                "VID: ${String.format("%04X", device.vendorId)}  PID: ${String.format("%04X", device.productId)}\n" +
-                "Device: ${device.deviceName}\n" +
-                "Interfaces: ${device.interfaceCount}"
+            "${index + 1}. $product$marker\nManufacturer: $manufacturer\nVID: ${String.format("%04X", device.vendorId)}  PID: ${String.format("%04X", device.productId)}\nDevice: ${device.deviceName}\nInterfaces: ${device.interfaceCount}"
         }
 
-        val knownPrinter = devices.firstOrNull {
-            it.vendorId == PRINTER_VENDOR_ID && it.productId == PRINTER_PRODUCT_ID
-        }
-        val endpointPrinter = devices.firstOrNull {
-            UsbPrinterConnection.findPrinterInterface(it) != null
-        }
+        val knownPrinter = devices.firstOrNull { it.vendorId == PRINTER_VENDOR_ID && it.productId == PRINTER_PRODUCT_ID }
+        val endpointPrinter = devices.firstOrNull { UsbPrinterConnection.findPrinterInterface(it) != null }
         val candidate = knownPrinter ?: endpointPrinter
 
         if (candidate == null) {
             usbDevice = null
             connect.isEnabled = false
-            details.text = "Android USB devices detected:\n\n" + deviceLines.joinToString("\n\n") +
-                "\n\nNo supported printer endpoint was found."
+            details.text = "Android USB devices detected:\n\n" + deviceLines.joinToString("\n\n") + "\n\nNo supported printer endpoint was found."
             setStatus("USB device(s) found, but no printer endpoint is available.")
             return
         }
@@ -260,10 +291,7 @@ class MainActivity : ComponentActivity() {
         val name = candidate.productName ?: candidate.deviceName ?: "USB Printer"
         val isKnownPrinter = candidate.vendorId == PRINTER_VENDOR_ID && candidate.productId == PRINTER_PRODUCT_ID
         val endpoint = UsbPrinterConnection.findPrinterInterface(candidate)
-
-        details.text = "Android USB devices detected:\n\n" +
-            deviceLines.joinToString("\n\n") +
-            "\n\nSelected: $name" +
+        details.text = "Android USB devices detected:\n\n" + deviceLines.joinToString("\n\n") + "\n\nSelected: $name" +
             "\nKnown printer VID/PID: ${if (isKnownPrinter) "YES" else "NO"}" +
             "\nBulk OUT endpoint: ${if (endpoint != null) "YES" else "NO"}" +
             "\nUSB permission: ${if (usbManager.hasPermission(candidate)) "GRANTED" else "NOT GRANTED"}"
@@ -289,7 +317,7 @@ class MainActivity : ComponentActivity() {
     private fun connectBluetooth() {
         val device = bluetoothDevice ?: return setStatus("Find a Bluetooth printer first.")
         if (!bluetoothAllowed()) { requestBluetoothPermission(); return }
-        val name = try { device.name ?: "Bluetooth Printer" } catch (_: SecurityException) { "Bluetooth Printer" }
+        val name = safeName(device)
         setStatus("Connecting to $name...")
         printerConnection = BluetoothPrinterConnection(device, { connected("Bluetooth", name) }, { disconnected() }, { error("Bluetooth", it) })
         printerConnection?.connect()
