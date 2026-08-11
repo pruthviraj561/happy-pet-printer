@@ -71,10 +71,8 @@ class BrowserPrintServer(private val context: Context) {
             val chars = CharArray(length)
             if (length > 0) reader.read(chars)
             val body = String(chars)
-
             when {
-                method == "GET" && path == "/" -> sendHtml(client)
-                method == "GET" && path == "/test" -> sendHtml(client)
+                method == "GET" && (path == "/" || path == "/test") -> sendHtml(client)
                 method == "GET" && path == "/api/v1/status" -> send(client, 200, status())
                 method == "GET" && path == "/api/v1/printers" -> send(client, 200, pairedPrinters())
                 method == "POST" && path == "/api/v1/printer/connect" -> connect(body, client)
@@ -99,23 +97,29 @@ class BrowserPrintServer(private val context: Context) {
 
         disconnectPrinter()
         val name = try { device.name ?: "Bluetooth Printer" } catch (_: SecurityException) { "Bluetooth Printer" }
-        val connection = BluetoothPrinterConnection(device, {
+
+        lateinit var connection: BluetoothPrinterConnection
+        connection = BluetoothPrinterConnection(device, {
             activePrinterType = "Bluetooth"
         }, {
-            activePrinter = null
-            activePrinterName = null
-            activePrinterAddress = null
-            activePrinterType = null
-        }, { message ->
+            if (activePrinter === connection) {
+                activePrinter = null
+                activePrinterName = null
+                activePrinterAddress = null
+                activePrinterType = null
+            }
+        }, { _ ->
             if (activePrinter === connection) activePrinterType = "Bluetooth"
         })
+
         activePrinter = connection
         activePrinterName = name
         activePrinterAddress = device.address
         activePrinterType = "Bluetooth"
 
         executor.execute {
-            try { connection.connect() } catch (_: Exception) { if (activePrinter === connection) disconnectPrinter() }
+            try { connection.connect() }
+            catch (_: Exception) { if (activePrinter === connection) disconnectPrinter() }
         }
         send(socket, 202, "{\"ok\":true,\"success\":true,\"status\":\"CONNECTING\",\"printer\":${quote(name)},\"address\":${quote(device.address)}}")
     }
@@ -183,7 +187,7 @@ class BrowserPrintServer(private val context: Context) {
     private fun sendHtml(socket: Socket) {
         val html = """
 <!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'><title>Happy Pet Printer Bridge</title>
-<style>body{font-family:Arial,sans-serif;max-width:720px;margin:30px auto;padding:0 18px}button{padding:12px 16px;margin:5px 0;width:100%}pre{background:#f4f4f4;padding:12px;white-space:pre-wrap}.ok{font-weight:bold}</style></head>
+<style>body{font-family:Arial,sans-serif;max-width:720px;margin:30px auto;padding:0 18px}button{padding:12px 16px;margin:5px 0;width:100%}pre{background:#f4f4f4;padding:12px;white-space:pre-wrap}</style></head>
 <body><h2>Happy Pet Printer Bridge</h2><p id='status'>Checking bridge...</p><button onclick='loadPrinters()'>Find Paired Printers</button><div id='printers'></div><button onclick='testPrint()'>Send ESC/POS Test Print</button><pre id='result'></pre>
 <script>
 const api=location.origin;
